@@ -53,9 +53,7 @@ import qualified Data.Text as Text
 import           Data.Type.Equality (TestEquality (..), (:~:) (Refl))
 
 import           Ouroboros.Consensus.Shelley.Eras as Consensus (StandardAllegra, StandardAlonzo,
-                   StandardCrypto, StandardMary, StandardShelley)
-
-import qualified Cardano.Ledger.Babbage as Babbage
+                   StandardBabbage, StandardMary, StandardShelley)
 
 import           Cardano.Api.HasTypeProxy
 
@@ -407,5 +405,5 @@ type family ShelleyLedgerEra era where
   ShelleyLedgerEra MaryEra    = Consensus.StandardMary
   ShelleyLedgerEra AlonzoEra  = Consensus.StandardAlonzo
   --TODO: Babbage era - depends on consensus exposing a babbage era
-  ShelleyLedgerEra BabbageEra = Babbage.BabbageEra StandardCrypto
+  ShelleyLedgerEra BabbageEra = Consensus.StandardBabbage
 
