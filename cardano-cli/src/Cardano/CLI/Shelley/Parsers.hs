@@ -1101,6 +1101,10 @@ pGenesisCmd =
     , subParser "initial-txin"
         (Opt.info pGenesisTxIn $
            Opt.progDesc "Get the TxIn for an initial UTxO based on the verification key")
+    , subParser "create-cardano"
+        (Opt.info pGenesisCreateCardano $
+           Opt.progDesc ("Create a Byron and Shelley genesis file from a genesis "
+                      ++ "template and genesis/delegation/spending keys."))
     , subParser "create"
         (Opt.info pGenesisCreate $
            Opt.progDesc ("Create a Shelley genesis file from a genesis "
@@ -1143,6 +1147,21 @@ pGenesisCmd =
     pGenesisTxIn :: Parser GenesisCmd
     pGenesisTxIn =
       GenesisTxIn <$> pVerificationKeyFile Input <*> pNetworkId <*> pMaybeOutputFile
+
+    pGenesisCreateCardano :: Parser GenesisCmd
+    pGenesisCreateCardano =
+      GenesisCreateCardano <$> pGenesisDir
+                    <*> pGenesisNumGenesisKeys
+                    <*> pGenesisNumUTxOKeys
+                    <*> pMaybeSystemStart
+                    <*> pInitialSupplyNonDelegated
+                    <*> pInitialReserves
+                    <*> pSecurityParam
+                    <*> pSlotCoefficient
+                    <*> pNetworkId
+                    <*> parseFilePath
+                          "genesis-defaults"
+                          "JSON file with genesis defaults for each era."
 
     pGenesisCreate :: Parser GenesisCmd
     pGenesisCreate =
@@ -1251,6 +1270,16 @@ pGenesisCmd =
           <> Opt.help "The initial coin supply in Lovelace which will be evenly distributed across initial, non-delegating stake holders."
           )
 
+    pInitialReserves :: Parser (Maybe Lovelace)
+    pInitialReserves =
+      Opt.optional $
+      Lovelace <$>
+        Opt.option Opt.auto
+          (  Opt.long "reserves"
+          <> Opt.metavar "LOVELACE"
+          <> Opt.help "The initial coin reserves in Lovelace"
+          )
+
     pInitialSupplyDelegated :: Parser Lovelace
     pInitialSupplyDelegated =
       fmap (Lovelace . fromMaybe 0) $ Opt.optional $
@@ -1259,6 +1288,24 @@ pGenesisCmd =
           <> Opt.metavar "LOVELACE"
           <> Opt.help "The initial coin supply in Lovelace which will be evenly distributed across initial, delegating stake holders."
           <> Opt.value 0
+          )
+
+    pSecurityParam :: Parser Word
+    pSecurityParam =
+        Opt.option Opt.auto
+          (  Opt.long "security-param"
+          <> Opt.metavar "INT"
+          <> Opt.help "Security parameter for genesis file [default is 8]."
+          <> Opt.value 8
+          )
+
+    pSlotCoefficient :: Parser Rational
+    pSlotCoefficient =
+        Opt.option readRationalUnitInterval
+          (  Opt.long "slot-coefficient"
+          <> Opt.metavar "RATIONAL"
+          <> Opt.help "Slot Coefficient for genesis file [default is .05]."
+          -- <> Opt.value .05
           )
 
     pBulkPoolCredFiles :: Parser Word
@@ -2992,6 +3039,15 @@ readStringOfMaxLength maxLen = do
       "The provided string must have at most 64 characters, but it has "
         <> show strLen
         <> " characters."
+
+parseFilePath :: String -> String -> Parser FilePath
+parseFilePath optname desc =
+  Opt.strOption
+    ( Opt.long optname
+    <> Opt.metavar "FILEPATH"
+    <> Opt.help desc
+    <> Opt.completer (bashCompleter "file")
+    )
 
 readRationalUnitInterval :: Opt.ReadM Rational
 readRationalUnitInterval = readRational >>= checkUnitInterval
