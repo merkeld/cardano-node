@@ -17,7 +17,7 @@ module Cardano.CLI.Shelley.Run.Genesis
   ) where
 
 import           Cardano.Prelude hiding (unlines)
-import           Prelude (id, unlines)
+import           Prelude (id, unlines, zip3)
 
 import           Data.Aeson hiding (Key)
 import qualified Data.Aeson as Aeson
@@ -409,23 +409,68 @@ runGenesisCreateCardano (GenesisDir rootdir)
                  genNumGenesisKeys genNumUTxOKeys
                  mStart mAmount mSecurity mSlotCoeff network paramsFile = do
   start <- maybe (SystemStart <$> getCurrentTimePlus30) pure mStart
-  let
   (genData, genSecrets) <- Byron.mkGenesis $ params start
-  dlgCerts <- mapM (findDelegateCert genData) . map ByronSigningKey $ gsRichSecrets genSecrets
+  let
+    genesisKeys = gsDlgIssuersSecrets genSecrets
+    byronGenesisKeys = map ByronSigningKey genesisKeys
+    shelleyGenesisKeys = map convertGenesisKey genesisKeys
+    shelleyGenesisvkeys :: [VerificationKey GenesisKey]
+    shelleyGenesisvkeys = map (castVerificationKey . getVerificationKey) shelleyGenesisKeys
+
+    delegateKeys = gsRichSecrets genSecrets
+    byronDelegateKeys = map ByronSigningKey delegateKeys
+    shelleyDelegateKeys = map convertDelegate delegateKeys
+    shelleyDelegatevkeys :: [VerificationKey GenesisDelegateKey]
+    shelleyDelegatevkeys = map (castVerificationKey . getVerificationKey) shelleyDelegateKeys
+
+    utxoKeys = gsPoorSecrets genSecrets
+    byronUtxoKeys = map (ByronSigningKey . Genesis.poorSecretToKey) utxoKeys
+    shelleyUtxoKeys = map (convertPoor . Genesis.poorSecretToKey) utxoKeys
+
+    toSKeyJSON :: Key a => SigningKey a -> ByteString
+    toSKeyJSON = LBS.toStrict . textEnvelopeToJSON Nothing
+
+    toVkeyJSON :: Key a => SigningKey a -> ByteString
+    toVkeyJSON = LBS.toStrict . textEnvelopeToJSON Nothing . getVerificationKey
+  dlgCerts <- mapM (findDelegateCert genData) . map ByronSigningKey $ delegateKeys
   liftIO $ do
+    vrfKeys <- forM (map (convertDelegate) delegateKeys) $ \key -> do
+      skey <- generateSigningKey AsVrfKey
+      pure skey
+
+    let
+      vrfvkeys = map getVerificationKey vrfKeys
+      combinedMap :: [ ( VerificationKey GenesisKey
+                       , VerificationKey GenesisDelegateKey
+                       , VerificationKey VrfKey
+                       )
+                     ]
+      combinedMap = zip3 shelleyGenesisvkeys shelleyDelegatevkeys vrfvkeys
+      hashKeys :: (VerificationKey GenesisKey, VerificationKey GenesisDelegateKey, VerificationKey VrfKey) -> (Hash GenesisKey, (Hash GenesisDelegateKey, Hash VrfKey))
+      hashKeys (genesis,delegate,vrf) = (verificationKeyHash genesis, (verificationKeyHash delegate, verificationKeyHash vrf));
+      delegateMap :: Map (Hash GenesisKey) (Hash GenesisDelegateKey, Hash VrfKey)
+      delegateMap = Map.fromList . (map hashKeys) $ combinedMap
+
+      foo :: ShelleyGenesis StandardShelley
+      foo = updateTemplate start delegateMap Nothing [] mempty 0 [] [] undefined
+
     createDirectoryIfMissing False rootdir
     createDirectoryIfMissing False gendir
     createDirectoryIfMissing False deldir
     createDirectoryIfMissing False utxodir
-    writeSecrets gendir "byron" "key" serialiseToRawBytes (map ByronSigningKey $ gsDlgIssuersSecrets genSecrets)
-    writeSecrets gendir "shelley" "skey" (LBS.toStrict . textEnvelopeToJSON Nothing) (map convertGenesisKey $ gsDlgIssuersSecrets genSecrets)
-    writeSecrets gendir "shelley" "vkey" (LBS.toStrict . textEnvelopeToJSON Nothing . getVerificationKey) (map convertGenesisKey $ gsDlgIssuersSecrets genSecrets)
-    writeSecrets deldir "byron" "key" serialiseToRawBytes (map ByronSigningKey $ gsRichSecrets genSecrets)
-    writeSecrets deldir "shelley" "skey" (LBS.toStrict . textEnvelopeToJSON Nothing) (map convertDelegate $ gsRichSecrets genSecrets)
-    writeSecrets deldir "shelley" "vkey" (LBS.toStrict . textEnvelopeToJSON Nothing . getVerificationKey) (map convertDelegate $ gsRichSecrets genSecrets)
-    writeSecrets utxodir "byron" "key" serialiseToRawBytes (map (ByronSigningKey . Genesis.poorSecretToKey) $ gsPoorSecrets genSecrets)
-    writeSecrets utxodir "shelley" "skey" (LBS.toStrict . textEnvelopeToJSON Nothing) (map (convertPoor . Genesis.poorSecretToKey) $ gsPoorSecrets genSecrets)
-    writeSecrets utxodir "shelley" "vkey" (LBS.toStrict . textEnvelopeToJSON Nothing . getVerificationKey) (map (convertPoor . Genesis.poorSecretToKey) $ gsPoorSecrets genSecrets)
+
+    writeSecrets gendir "byron" "key" serialiseToRawBytes byronGenesisKeys
+    writeSecrets gendir "shelley" "skey" toSKeyJSON shelleyGenesisKeys
+    writeSecrets gendir "shelley" "vkey" toVkeyJSON shelleyGenesisKeys
+
+    writeSecrets deldir "byron" "key" serialiseToRawBytes byronDelegateKeys
+    writeSecrets deldir "shelley" "skey" toSKeyJSON shelleyDelegateKeys
+    writeSecrets deldir "shelley" "vkey" toVkeyJSON shelleyDelegateKeys
+
+    writeSecrets utxodir "byron" "key" serialiseToRawBytes byronUtxoKeys
+    writeSecrets utxodir "shelley" "skey" toSKeyJSON shelleyUtxoKeys
+    writeSecrets utxodir "shelley" "vkey" toVkeyJSON shelleyUtxoKeys
+
     writeSecrets deldir "byron" "cert.json" serialiseDelegationCert dlgCerts
 
     LBS.writeFile (rootdir </> "byron-genesis.json") (canonicalEncodePretty genData)
