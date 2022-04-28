@@ -1160,8 +1160,14 @@ pGenesisCmd =
                     <*> pSlotCoefficient
                     <*> pNetworkId
                     <*> parseFilePath
-                          "genesis-defaults"
-                          "JSON file with genesis defaults for each era."
+                          "byron-template"
+                          "JSON file with genesis defaults for each byron."
+                    <*> parseFilePath
+                          "shelley-template"
+                          "JSON file with genesis defaults for each shelley."
+                    <*> parseFilePath
+                          "alonzo-template"
+                          "JSON file with genesis defaults for each alonzo."
 
     pGenesisCreate :: Parser GenesisCmd
     pGenesisCreate =
