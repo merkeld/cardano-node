@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
@@ -43,7 +44,7 @@ import qualified Cardano.Crypto.Random as Crypto
 import qualified Cardano.Crypto as CC
 import           Crypto.Random as Crypto
 
-import           System.Directory (createDirectoryIfMissing, listDirectory)
+import           System.Directory (createDirectoryIfMissing, listDirectory, readable, setPermissions, emptyPermissions)
 import           System.FilePath (takeExtension, takeExtensions, (</>))
 import           System.IO.Error (isDoesNotExistError)
 
@@ -84,12 +85,16 @@ import           Cardano.CLI.Shelley.Run.StakeAddress (ShelleyStakeAddressCmdErr
 import           Cardano.CLI.Types
 
 import           Cardano.CLI.Byron.Delegation
-import           Cardano.CLI.Byron.Key
+import qualified Cardano.CLI.Byron.Key as Byron
+import qualified Cardano.Crypto.Signing as Byron
 import           Cardano.CLI.Byron.Genesis as Byron
-import           Cardano.Chain.Genesis (FakeAvvmOptions (..), TestnetBalanceOptions (..))
-import qualified Cardano.Chain.Common as Byron (rationalToLovelacePortion, mkKnownLovelace)
+import           Cardano.Chain.Genesis (FakeAvvmOptions (..), TestnetBalanceOptions (..), gsDlgIssuersSecrets, gsRichSecrets, gsPoorSecrets)
+import qualified Cardano.Chain.Common as Byron (rationalToLovelacePortion, mkKnownLovelace, KeyHash)
 
 import           Cardano.Chain.Common (BlockCount)
+import           Text.Printf (printf)
+import qualified Cardano.Chain.Genesis as Genesis
+import           Cardano.Chain.Delegation (delegateVK)
 
 {- HLINT ignore "Reduce duplication" -}
 
@@ -405,13 +410,23 @@ runGenesisCreateCardano (GenesisDir rootdir)
   start <- maybe (SystemStart <$> getCurrentTimePlus30) pure mStart
   let
   (genData, genSecrets) <- Byron.mkGenesis $ params start
+  --dlgCerts <- mapM findDelegateCert . map ByronSigningKey $ gsRichSecrets genSecrets
   liftIO $ do
     createDirectoryIfMissing False rootdir
     createDirectoryIfMissing False gendir
     createDirectoryIfMissing False deldir
     createDirectoryIfMissing False utxodir
+    writeSecrets gendir "byron" "key" serialiseToRawBytes (map ByronSigningKey $ gsDlgIssuersSecrets genSecrets)
+    writeSecrets gendir "shelley" "key" serialiseToRawBytes (map ByronSigningKey $ gsDlgIssuersSecrets genSecrets)
+    writeSecrets deldir "byron" "key" serialiseToRawBytes (map ByronSigningKey $ gsRichSecrets genSecrets)
+    writeSecrets utxodir "byron" "key" serialiseToRawBytes (map (ByronSigningKey . Genesis.poorSecretToKey) $ gsPoorSecrets genSecrets)
+    --writeSecrets deldir "byron" "byron-deleg-cert.json" serialiseDelegationCert dlgCerts
+    --writeSecrets  "avvm-secrets" "secret" printFakeAvvmSecrets $ gsFakeAvvmSecrets genSecrets
 
   where
+    convertGenesisKey :: Byron.SigningKey -> SigningKey GenesisExtendedKey
+    convertGenesisKey (Byron.SigningKey xsk) = GenesisExtendedSigningKey xsk
+
     params start = Byron.GenesisParameters (getSystemStart start) paramsFile mSecurity byronNetwork byronBalance byronFakeAvvm byronAvvmFactor Nothing
     gendir  = rootdir </> "genesis-keys"
     deldir  = rootdir </> "delegate-keys"
@@ -420,8 +435,8 @@ runGenesisCreateCardano (GenesisDir rootdir)
                       (Annotated (toByronProtocolMagicId network) ())
                       (toByronRequiresNetworkMagic network)
     byronBalance = TestnetBalanceOptions
-        { tboPoors = genNumGenesisKeys
-        , tboRichmen = 0
+        { tboRichmen = genNumGenesisKeys
+        , tboPoors = 0
         , tboTotalBalance = fromMaybe zeroLovelace $ toByronLovelace (fromMaybe 0 mAmount)
         , tboRichmenShare = 0
         }
@@ -431,6 +446,32 @@ runGenesisCreateCardano (GenesisDir rootdir)
         }
     byronAvvmFactor = Byron.rationalToLovelacePortion 0.0
     zeroLovelace = Byron.mkKnownLovelace @0
+
+    -- Compare a given 'SigningKey' with a 'Certificate' 'VerificationKey'
+    --isCertForSK :: CC.SigningKey -> Certificate -> Bool
+    --isCertForSK sk cert = delegateVK cert == CC.toVerification sk
+
+    --dlgCertMap :: Genesis.GenesisData -> Map Byron.KeyHash Certificate
+    --dlgCertMap genData = Genesis.unGenesisDelegation $ Genesis.gdHeavyDelegation genData
+
+    --findDelegateCert :: Genesis.GenesisData -> SigningKey ByronKey -> ExceptT ByronGenesisError IO Certificate
+    --findDelegateCert genData bSkey@(ByronSigningKey sk) =
+    --  case find (isCertForSK sk) (Map.elems $ dlgCertMap genData) of
+    --    Nothing -> Left . NoGenesisDelegationForKey
+    --               . prettyPublicKey $ getVerificationKey bSkey
+    --    Just x  -> Right x
+
+    writeSecrets :: FilePath -> [Char] -> [Char] -> (a -> ByteString) -> [a] -> IO ()
+    writeSecrets outDir prefix suffix secretOp xs =
+      forM_ (zip xs [0::Int ..]) $
+      \(secret, nr)-> do
+        let filename = outDir </> prefix <> "." <> printf "%03d" nr <> "." <> suffix
+        BS.writeFile filename $ secretOp secret
+#ifdef UNIX
+       setFileMode    filename ownerReadMode
+#else
+        setPermissions filename (emptyPermissions {readable = True})
+#endif
   -- dlgCerts <- mapM findDelegateCert . map ByronSigningKey $ gsRichSecrets gs
   -- liftIO $ wOut gendir "key"
   --               serialiseToRawBytes
@@ -460,40 +501,12 @@ runGenesisCreateCardano (GenesisDir rootdir)
   --  gendir  = rootdir </> "genesis-keys"
   --  deldir  = rootdir </> "delegate-keys"
   --  utxodir = rootdir </> "utxo-keys"
-    -- dlgCertMap :: Map Common.KeyHash Certificate
-    -- dlgCertMap = Genesis.unGenesisDelegation $ Genesis.gdHeavyDelegation genesisData
-
-    -- findDelegateCert :: SigningKey ByronKey -> ExceptT ByronGenesisError IO Certificate
-    -- findDelegateCert bSkey@(ByronSigningKey sk) =
-    --   case find (isCertForSK sk) (Map.elems dlgCertMap) of
-    --     Nothing -> left . NoGenesisDelegationForKey
-    --                . prettyPublicKey $ getVerificationKey bSkey
-    --     Just x  -> right x
 
   --  genesisJSONFile :: FilePath
   --  genesisJSONFile = outDir <> "/genesis.json"
 
   --  printFakeAvvmSecrets :: Crypto.RedeemSigningKey -> ByteString
   --  printFakeAvvmSecrets rskey = encodeUtf8 . toStrict . toLazyText $ build rskey
-
-  --  -- Compare a given 'SigningKey' with a 'Certificate' 'VerificationKey'
-  --  isCertForSK :: Crypto.SigningKey -> Certificate -> Bool
-  --  isCertForSK sk cert = delegateVK cert == Crypto.toVerification sk
-
-    -- wOut :: String -> String -> (a -> ByteString) -> [a] -> IO ()
-    -- wOut = writeSecrets outDir
-    -- writeSecrets :: FilePath -> String -> String -> (a -> ByteString) -> [a] -> IO ()
-    -- writeSecrets outDir prefix suffix secretOp xs =
-    --   forM_ (zip xs [0::Int ..]) $
-    --   \(secret, nr)-> do
-    --     let filename = outDir </> prefix <> "." <> printf "%03d" nr <> "." <> suffix
-    --     BS.writeFile filename $ secretOp secret
-    -- #ifdef UNIX
-    --     setFileMode    filename ownerReadMode
-    -- #else
-    --     setPermissions filename (emptyPermissions {readable = True})
-    -- #endif
-
 
 runGenesisCreateStaked
   :: GenesisDir
