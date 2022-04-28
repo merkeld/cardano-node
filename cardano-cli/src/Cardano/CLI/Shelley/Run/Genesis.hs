@@ -40,6 +40,7 @@ import           Cardano.Binary (ToCBOR (..))
 import           Cardano.Crypto.Hash (HashAlgorithm)
 import qualified Cardano.Crypto.Hash as Hash
 import qualified Cardano.Crypto.Random as Crypto
+import qualified Cardano.Crypto as CC
 import           Crypto.Random as Crypto
 
 import           System.Directory (createDirectoryIfMissing, listDirectory)
@@ -54,7 +55,7 @@ import qualified Cardano.Crypto.Hash as Crypto
 import           Cardano.Api
 import           Cardano.Api.Shelley
 import           Cardano.Api.Byron (ByronKey, SerialiseAsRawBytes (..), SigningKey (..),
-                     toByronRequiresNetworkMagic)
+                     toByronRequiresNetworkMagic, toByronProtocolMagicId)
 
 import           Ouroboros.Consensus.BlockchainTime (SystemStart (..))
 import           Ouroboros.Consensus.Shelley.Eras (StandardShelley)
@@ -84,6 +85,9 @@ import           Cardano.CLI.Types
 
 import           Cardano.CLI.Byron.Delegation
 import           Cardano.CLI.Byron.Key
+import           Cardano.CLI.Byron.Genesis as Byron
+import           Cardano.Chain.Genesis (FakeAvvmOptions (..), TestnetBalanceOptions (..))
+import qualified Cardano.Chain.Common as Byron (rationalToLovelacePortion)
 
 {- HLINT ignore "Reduce duplication" -}
 
@@ -393,18 +397,30 @@ runGenesisCreateCardano :: GenesisDir
 runGenesisCreateCardano (GenesisDir rootdir)
                  genNumGenesisKeys genNumUTxOKeys
                  mStart mAmount mReserves mSecurity mSlotCoeff network paramsFile = do
+  (genData, genSecrets) <- Byron.mkGenesis params
   liftIO $ do
     createDirectoryIfMissing False rootdir
     createDirectoryIfMissing False gendir
     createDirectoryIfMissing False deldir
     createDirectoryIfMissing False utxodir
-  --   LB.writeFile genesisJSONFile (canonicalEncodePretty genesisData)
 
+  where
+    gendir  = rootdir </> "genesis-keys"
+    deldir  = rootdir </> "delegate-keys"
+    utxodir = rootdir </> "utxo-keys"
+    params = Byron.GenesisParameters systemStart paramsFile mSecurity byronNetwork byronBalance byronFakeAvvm byronAvvmFactor Nothing
+    systemStart = undefined mStart
+    byronNetwork = CC.AProtocolMagic
+                      (toByronProtocolMagicId network)
+                      (toByronRequiresNetworkMagic network)
+    byronBalance = TestnetBalanceOptions genNumGenesisKeys 0
+    byronFakeAvvm = FakeAvvmOptions 0 0
+    byronAvvmFactor = Byron.rationalToLovelacePortion 0.0
   -- dlgCerts <- mapM findDelegateCert . map ByronSigningKey $ gsRichSecrets gs
-  -- liftIO $ wOut "genesis-keys" "key"
+  -- liftIO $ wOut gendir "key"
   --               serialiseToRawBytes
   --               (map ByronSigningKey $ gsDlgIssuersSecrets gs)
-  -- liftIO $ wOut "delegate-keys" "key"
+  -- liftIO $ wOut deldir "key"
   --               serialiseToRawBytes
   --               (map ByronSigningKey $ gsRichSecrets gs)
   -- liftIO $ wOut "delegation-cert" "json" serialiseDelegationCert dlgCerts
@@ -424,21 +440,20 @@ runGenesisCreateCardano (GenesisDir rootdir)
   --writeFileGenesis (rootdir </> "genesis.json")        shelleyGenesis
   --writeFileGenesis (rootdir </> "genesis.alonzo.json") alonzoGenesis
   --TODO: rationalise the naming convention on these genesis json files.
-  where
+  --where
   --  adjustTemplate t = t { sgNetworkMagic = unNetworkMagic (toNetworkMagic network) }
-    gendir  = rootdir </> "genesis-keys"
-    deldir  = rootdir </> "delegate-keys"
-    utxodir = rootdir </> "utxo-keys"
-    byrondir = rootdir </> "byron-keys"
-  --  dlgCertMap :: Map Common.KeyHash Certificate
-  --  dlgCertMap = Genesis.unGenesisDelegation $ Genesis.gdHeavyDelegation genesisData
+  --  gendir  = rootdir </> "genesis-keys"
+  --  deldir  = rootdir </> "delegate-keys"
+  --  utxodir = rootdir </> "utxo-keys"
+    -- dlgCertMap :: Map Common.KeyHash Certificate
+    -- dlgCertMap = Genesis.unGenesisDelegation $ Genesis.gdHeavyDelegation genesisData
 
-  --  findDelegateCert :: SigningKey ByronKey -> ExceptT ByronGenesisError IO Certificate
-  --  findDelegateCert bSkey@(ByronSigningKey sk) =
-  --    case find (isCertForSK sk) (Map.elems dlgCertMap) of
-  --      Nothing -> left . NoGenesisDelegationForKey
-  --                 . prettyPublicKey $ getVerificationKey bSkey
-  --      Just x  -> right x
+    -- findDelegateCert :: SigningKey ByronKey -> ExceptT ByronGenesisError IO Certificate
+    -- findDelegateCert bSkey@(ByronSigningKey sk) =
+    --   case find (isCertForSK sk) (Map.elems dlgCertMap) of
+    --     Nothing -> left . NoGenesisDelegationForKey
+    --                . prettyPublicKey $ getVerificationKey bSkey
+    --     Just x  -> right x
 
   --  genesisJSONFile :: FilePath
   --  genesisJSONFile = outDir <> "/genesis.json"
@@ -450,19 +465,19 @@ runGenesisCreateCardano (GenesisDir rootdir)
   --  isCertForSK :: Crypto.SigningKey -> Certificate -> Bool
   --  isCertForSK sk cert = delegateVK cert == Crypto.toVerification sk
 
-  --  wOut :: String -> String -> (a -> ByteString) -> [a] -> IO ()
-  --  wOut = writeSecrets outDir
-  --  writeSecrets :: FilePath -> String -> String -> (a -> ByteString) -> [a] -> IO ()
-  --  writeSecrets outDir prefix suffix secretOp xs =
-  --    forM_ (zip xs [0::Int ..]) $
-  --    \(secret, nr)-> do
-  --      let filename = outDir </> prefix <> "." <> printf "%03d" nr <> "." <> suffix
-  --      BS.writeFile filename $ secretOp secret
-  --  #ifdef UNIX
-  --      setFileMode    filename ownerReadMode
-  --  #else
-  --      setPermissions filename (emptyPermissions {readable = True})
-  --  #endif
+    -- wOut :: String -> String -> (a -> ByteString) -> [a] -> IO ()
+    -- wOut = writeSecrets outDir
+    -- writeSecrets :: FilePath -> String -> String -> (a -> ByteString) -> [a] -> IO ()
+    -- writeSecrets outDir prefix suffix secretOp xs =
+    --   forM_ (zip xs [0::Int ..]) $
+    --   \(secret, nr)-> do
+    --     let filename = outDir </> prefix <> "." <> printf "%03d" nr <> "." <> suffix
+    --     BS.writeFile filename $ secretOp secret
+    -- #ifdef UNIX
+    --     setFileMode    filename ownerReadMode
+    -- #else
+    --     setPermissions filename (emptyPermissions {readable = True})
+    -- #endif
 
 
 runGenesisCreateStaked
