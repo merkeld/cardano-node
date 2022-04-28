@@ -42,6 +42,7 @@ library
                         -- we create wrapper types for the ledger types
                         -- in this module
                         Cardano.Api.Orphans
+                        Cardano.Api.SerialiseTextEnvelope
 
   other-modules:
                         -- Splitting up the big Typed module:
@@ -75,7 +76,6 @@ library
                         Cardano.Api.SerialiseJSON
                         Cardano.Api.SerialiseLedgerCddl
                         Cardano.Api.SerialiseRaw
-                        Cardano.Api.SerialiseTextEnvelope
                         Cardano.Api.SerialiseUsing
                         Cardano.Api.Shelley.Genesis
                         Cardano.Api.SpecialByron

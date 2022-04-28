@@ -1156,7 +1156,6 @@ pGenesisCmd =
                     <*> pGenesisNumUTxOKeys
                     <*> pMaybeSystemStart
                     <*> pInitialSupplyNonDelegated
-                    <*> pInitialReserves
                     <*> pSecurityParam
                     <*> pSlotCoefficient
                     <*> pNetworkId
@@ -1269,16 +1268,6 @@ pGenesisCmd =
           (  Opt.long "supply"
           <> Opt.metavar "LOVELACE"
           <> Opt.help "The initial coin supply in Lovelace which will be evenly distributed across initial, non-delegating stake holders."
-          )
-
-    pInitialReserves :: Parser (Maybe Lovelace)
-    pInitialReserves =
-      Opt.optional $
-      Lovelace <$>
-        Opt.option Opt.auto
-          (  Opt.long "reserves"
-          <> Opt.metavar "LOVELACE"
-          <> Opt.help "The initial coin reserves in Lovelace"
           )
 
     pInitialSupplyDelegated :: Parser Lovelace
