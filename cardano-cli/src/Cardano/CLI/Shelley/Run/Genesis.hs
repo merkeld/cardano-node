@@ -35,7 +35,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import           Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
 
-import           Cardano.Binary (ToCBOR (..))
+import           Cardano.Binary (ToCBOR (..), Annotated(Annotated))
 
 import           Cardano.Crypto.Hash (HashAlgorithm)
 import qualified Cardano.Crypto.Hash as Hash
@@ -55,7 +55,7 @@ import qualified Cardano.Crypto.Hash as Crypto
 import           Cardano.Api
 import           Cardano.Api.Shelley
 import           Cardano.Api.Byron (ByronKey, SerialiseAsRawBytes (..), SigningKey (..),
-                     toByronRequiresNetworkMagic, toByronProtocolMagicId)
+                     toByronRequiresNetworkMagic, toByronProtocolMagicId, toByronLovelace)
 
 import           Ouroboros.Consensus.BlockchainTime (SystemStart (..))
 import           Ouroboros.Consensus.Shelley.Eras (StandardShelley)
@@ -87,7 +87,9 @@ import           Cardano.CLI.Byron.Delegation
 import           Cardano.CLI.Byron.Key
 import           Cardano.CLI.Byron.Genesis as Byron
 import           Cardano.Chain.Genesis (FakeAvvmOptions (..), TestnetBalanceOptions (..))
-import qualified Cardano.Chain.Common as Byron (rationalToLovelacePortion)
+import qualified Cardano.Chain.Common as Byron (rationalToLovelacePortion, mkKnownLovelace)
+
+import           Cardano.Chain.Common (BlockCount)
 
 {- HLINT ignore "Reduce duplication" -}
 
@@ -108,6 +110,7 @@ data ShelleyGenesisCmdError
   | ShelleyGenesisCmdPoolCmdError !ShelleyPoolCmdError
   | ShelleyGenesisCmdStakeAddressCmdError !ShelleyStakeAddressCmdError
   | ShelleyGenesisCmdCostModelsError !FilePath
+  | ShelleyGenesisCmdByronError !ByronGenesisError
   deriving Show
 
 instance Error ShelleyGenesisCmdError where
@@ -157,7 +160,9 @@ runGenesisCmd (GenesisVerKey vk sk) = runGenesisVerKey vk sk
 runGenesisCmd (GenesisTxIn vk nw mOutFile) = runGenesisTxIn vk nw mOutFile
 runGenesisCmd (GenesisAddr vk nw mOutFile) = runGenesisAddr vk nw mOutFile
 runGenesisCmd (GenesisCreate gd gn un ms am nw) = runGenesisCreate gd gn un ms am nw
-runGenesisCmd (GenesisCreateCardano gd gn un ms am rs k sc nw pf) = runGenesisCreateCardano gd gn un ms am rs k sc nw pf
+runGenesisCmd (GenesisCreateCardano gd gn un ms am rs k sc nw pf) = do
+  withExceptT ShelleyGenesisCmdByronError $ do
+    runGenesisCreateCardano gd gn un ms am rs k sc nw pf
 runGenesisCmd (GenesisCreateStaked gd gn gp gl un ms am ds nw bf bp su) = runGenesisCreateStaked gd gn gp gl un ms am ds nw bf bp su
 runGenesisCmd (GenesisHashFile gf) = runGenesisHashFile gf
 
@@ -389,15 +394,17 @@ runGenesisCreateCardano :: GenesisDir
                  -> Maybe SystemStart
                  -> Maybe Lovelace
                  -> Maybe Lovelace
-                 -> Word
+                 -> BlockCount
                  -> Rational
                  -> NetworkId
                  -> FilePath
-                 -> ExceptT ShelleyGenesisCmdError IO ()
+                 -> ExceptT ByronGenesisError IO ()
 runGenesisCreateCardano (GenesisDir rootdir)
                  genNumGenesisKeys genNumUTxOKeys
                  mStart mAmount mReserves mSecurity mSlotCoeff network paramsFile = do
-  (genData, genSecrets) <- Byron.mkGenesis params
+  start <- maybe (SystemStart <$> getCurrentTimePlus30) pure mStart
+  let
+  (genData, genSecrets) <- Byron.mkGenesis $ params start
   liftIO $ do
     createDirectoryIfMissing False rootdir
     createDirectoryIfMissing False gendir
@@ -405,17 +412,25 @@ runGenesisCreateCardano (GenesisDir rootdir)
     createDirectoryIfMissing False utxodir
 
   where
+    params start = Byron.GenesisParameters (getSystemStart start) paramsFile mSecurity byronNetwork byronBalance byronFakeAvvm byronAvvmFactor Nothing
     gendir  = rootdir </> "genesis-keys"
     deldir  = rootdir </> "delegate-keys"
     utxodir = rootdir </> "utxo-keys"
-    params = Byron.GenesisParameters systemStart paramsFile mSecurity byronNetwork byronBalance byronFakeAvvm byronAvvmFactor Nothing
-    systemStart = undefined mStart
     byronNetwork = CC.AProtocolMagic
-                      (toByronProtocolMagicId network)
+                      (Annotated (toByronProtocolMagicId network) ())
                       (toByronRequiresNetworkMagic network)
-    byronBalance = TestnetBalanceOptions genNumGenesisKeys 0
-    byronFakeAvvm = FakeAvvmOptions 0 0
+    byronBalance = TestnetBalanceOptions
+        { tboPoors = genNumGenesisKeys
+        , tboRichmen = 0
+        , tboTotalBalance = fromMaybe zeroLovelace $ toByronLovelace (fromMaybe 0 mAmount)
+        , tboRichmenShare = 0
+        }
+    byronFakeAvvm = FakeAvvmOptions
+        { faoCount = 0
+        , faoOneBalance = zeroLovelace
+        }
     byronAvvmFactor = Byron.rationalToLovelacePortion 0.0
+    zeroLovelace = Byron.mkKnownLovelace @0
   -- dlgCerts <- mapM findDelegateCert . map ByronSigningKey $ gsRichSecrets gs
   -- liftIO $ wOut gendir "key"
   --               serialiseToRawBytes
@@ -798,7 +813,7 @@ computeDelegation nw delegDir pool delegIx = do
    stakeVKF = delegDir </> "staking" ++ strIndexDeleg ++ ".vkey"
 
 -- | Current UTCTime plus 30 seconds
-getCurrentTimePlus30 :: ExceptT ShelleyGenesisCmdError IO UTCTime
+getCurrentTimePlus30 :: ExceptT a IO UTCTime
 getCurrentTimePlus30 =
     plus30sec <$> liftIO getCurrentTime
   where

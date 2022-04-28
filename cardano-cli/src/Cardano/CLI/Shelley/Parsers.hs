@@ -54,6 +54,7 @@ import qualified Text.Parsec.String as Parsec
 import qualified Text.Parsec.Token as Parsec
 
 import qualified Cardano.Ledger.Shelley.TxBody as Shelley
+import           Cardano.Chain.Common (BlockCount(BlockCount))
 
 {- HLINT ignore "Use <$>" -}
 
@@ -1290,13 +1291,13 @@ pGenesisCmd =
           <> Opt.value 0
           )
 
-    pSecurityParam :: Parser Word
+    pSecurityParam :: Parser BlockCount
     pSecurityParam =
         Opt.option Opt.auto
           (  Opt.long "security-param"
           <> Opt.metavar "INT"
           <> Opt.help "Security parameter for genesis file [default is 8]."
-          <> Opt.value 8
+          <> (Opt.value $ BlockCount 8)
           )
 
     pSlotCoefficient :: Parser Rational
