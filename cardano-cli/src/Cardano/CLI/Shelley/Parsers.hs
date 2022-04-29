@@ -1156,7 +1156,8 @@ pGenesisCmd =
                     <*> pGenesisNumUTxOKeys
                     <*> pMaybeSystemStart
                     <*> pInitialSupplyNonDelegated
-                    <*> pSecurityParam
+                    <*> (BlockCount <$> pSecurityParam)
+                    <*> pSlotLength
                     <*> pSlotCoefficient
                     <*> pNetworkId
                     <*> parseFilePath
@@ -1286,14 +1287,24 @@ pGenesisCmd =
           <> Opt.value 0
           )
 
-    pSecurityParam :: Parser BlockCount
+    pSecurityParam :: Parser Word64
     pSecurityParam =
         Opt.option Opt.auto
           (  Opt.long "security-param"
           <> Opt.metavar "INT"
           <> Opt.help "Security parameter for genesis file [default is 8]."
-          <> (Opt.value $ BlockCount 8)
+          <> (Opt.value $ 8)
           )
+
+    pSlotLength :: Parser Word
+    pSlotLength =
+        Opt.option Opt.auto
+          (  Opt.long "slot-length"
+          <> Opt.metavar "INT"
+          <> Opt.help "slot length (ms) parameter for genesis file [default is 1000]."
+          <> (Opt.value $ 1000)
+          )
+
 
     pSlotCoefficient :: Parser Rational
     pSlotCoefficient =

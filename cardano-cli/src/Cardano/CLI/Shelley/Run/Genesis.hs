@@ -34,7 +34,7 @@ import qualified Data.Sequence.Strict as Seq
 import           Data.String (fromString)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import           Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime)
+import           Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime, picosecondsToDiffTime, secondsToNominalDiffTime)
 
 import           Cardano.Binary (ToCBOR (..), Annotated(Annotated))
 
@@ -55,8 +55,7 @@ import qualified Cardano.Crypto.Hash as Crypto
 
 import           Cardano.Api
 import           Cardano.Api.Shelley
-import           Cardano.Api.Byron (ByronKey, SerialiseAsRawBytes (..), SigningKey (..),
-                     toByronRequiresNetworkMagic, toByronProtocolMagicId, toByronLovelace)
+import           Cardano.Api.Byron (toByronRequiresNetworkMagic, toByronProtocolMagicId, toByronLovelace)
 
 import           Ouroboros.Consensus.BlockchainTime (SystemStart (..))
 import           Ouroboros.Consensus.Shelley.Eras (StandardShelley)
@@ -88,7 +87,7 @@ import           Cardano.CLI.Byron.Delegation
 import qualified Cardano.CLI.Byron.Key as Byron
 import qualified Cardano.Crypto.Signing as Byron
 import           Cardano.CLI.Byron.Genesis as Byron
-import           Cardano.Chain.Genesis (FakeAvvmOptions (..), TestnetBalanceOptions (..), gsDlgIssuersSecrets, gsRichSecrets, gsPoorSecrets)
+import           Cardano.Chain.Genesis (FakeAvvmOptions (..), TestnetBalanceOptions (..), gsDlgIssuersSecrets, gsRichSecrets, gsPoorSecrets, gdProtocolParameters)
 import qualified Cardano.Chain.Common as Byron (rationalToLovelacePortion, mkKnownLovelace, KeyHash)
 
 import           Cardano.Chain.Common (BlockCount(unBlockCount))
@@ -98,6 +97,8 @@ import           Cardano.Chain.Delegation (delegateVK)
 import           Cardano.Api.SerialiseTextEnvelope (textEnvelopeToJSON)
 import qualified Cardano.Chain.Delegation as Dlg
 import           Cardano.Slotting.Slot (EpochSize(EpochSize))
+import           Cardano.Chain.Update
+import           Data.Fixed (div', Fixed(MkFixed))
 
 {- HLINT ignore "Reduce duplication" -}
 
@@ -158,6 +159,7 @@ instance Error ShelleyGenesisCmdError where
        "Error while decoding Shelley genesis at: " <> fp <>
        " Error: " <>  Text.unpack e
       ShelleyGenesisCmdGenesisFileReadError e -> displayError e
+      ShelleyGenesisCmdByronError e -> show e
 
 runGenesisCmd :: GenesisCmd -> ExceptT ShelleyGenesisCmdError IO ()
 runGenesisCmd (GenesisKeyGenGenesis vk sk) = runGenesisKeyGenGenesis vk sk
@@ -168,7 +170,7 @@ runGenesisCmd (GenesisVerKey vk sk) = runGenesisVerKey vk sk
 runGenesisCmd (GenesisTxIn vk nw mOutFile) = runGenesisTxIn vk nw mOutFile
 runGenesisCmd (GenesisAddr vk nw mOutFile) = runGenesisAddr vk nw mOutFile
 runGenesisCmd (GenesisCreate gd gn un ms am nw) = runGenesisCreate gd gn un ms am nw
-runGenesisCmd (GenesisCreateCardano gd gn un ms am k sc nw bg sg ag) = runGenesisCreateCardano gd gn un ms am k sc nw bg sg ag
+runGenesisCmd (GenesisCreateCardano gd gn un ms am k slotLength sc nw bg sg ag) = runGenesisCreateCardano gd gn un ms am k slotLength sc nw bg sg ag
 runGenesisCmd (GenesisCreateStaked gd gn gp gl un ms am ds nw bf bp su) = runGenesisCreateStaked gd gn gp gl un ms am ds nw bf bp su
 runGenesisCmd (GenesisHashFile gf) = runGenesisHashFile gf
 
@@ -400,6 +402,7 @@ runGenesisCreateCardano :: GenesisDir
                  -> Maybe SystemStart
                  -> Maybe Lovelace
                  -> BlockCount
+                 -> Word     -- slot length in ms
                  -> Rational
                  -> NetworkId
                  -> FilePath -- Byron Genesis
@@ -407,12 +410,17 @@ runGenesisCreateCardano :: GenesisDir
                  -> FilePath -- Alonzo Genesis
                  -> ExceptT ShelleyGenesisCmdError IO ()
 runGenesisCreateCardano (GenesisDir rootdir)
-                 genNumGenesisKeys genNumUTxOKeys
-                 mStart mAmount mSecurity mSlotCoeff
+                 genNumGenesisKeys _genNumUTxOKeys
+                 mStart mAmount mSecurity slotLength mSlotCoeff
                  network byronGenesisT shelleyGenesisT alonzoGenesisT = do
   start <- maybe (SystemStart <$> getCurrentTimePlus30) pure mStart
-  (byronGenesis, byronSecrets) <- fixError $ Byron.mkGenesis $ byronParams start
+  (byronGenesis', byronSecrets) <- fixError $ Byron.mkGenesis $ byronParams start
   let
+    byronGenesis = byronGenesis'
+      { gdProtocolParameters = (gdProtocolParameters byronGenesis') {
+          ppSlotDuration = floor ( (toRational slotLength) * (recip mSlotCoeff) )
+        }
+      }
 
     genesisKeys = gsDlgIssuersSecrets byronSecrets
     byronGenesisKeys = map ByronSigningKey genesisKeys
@@ -422,6 +430,7 @@ runGenesisCreateCardano (GenesisDir rootdir)
 
     delegateKeys = gsRichSecrets byronSecrets
     byronDelegateKeys = map ByronSigningKey delegateKeys
+    shelleyDelegateKeys :: [SigningKey GenesisDelegateExtendedKey]
     shelleyDelegateKeys = map convertDelegate delegateKeys
     shelleyDelegatevkeys :: [VerificationKey GenesisDelegateKey]
     shelleyDelegatevkeys = map (castVerificationKey . getVerificationKey) shelleyDelegateKeys
@@ -435,6 +444,9 @@ runGenesisCreateCardano (GenesisDir rootdir)
 
     toVkeyJSON :: Key a => SigningKey a -> ByteString
     toVkeyJSON = LBS.toStrict . textEnvelopeToJSON Nothing . getVerificationKey
+
+    toVkeyJSON' :: Key a => VerificationKey a -> ByteString
+    toVkeyJSON' = LBS.toStrict . textEnvelopeToJSON Nothing
   dlgCerts <- fixError $ mapM (findDelegateCert byronGenesis) . map ByronSigningKey $ delegateKeys
   let
     overrideShelleyGenesis t = t
@@ -446,14 +458,15 @@ runGenesisCreateCardano (GenesisDir rootdir)
       , sgEpochLength = EpochSize $ floor $ (fromIntegral (unBlockCount mSecurity) * 10) / mSlotCoeff
       , sgMaxLovelaceSupply = 45000000000000000
       , sgSystemStart = getSystemStart start
+      , sgSlotLength = secondsToNominalDiffTime (((MkFixed $ fromIntegral slotLength) * 1000000000))
       }
-  shelleyGenesisTemplate <- readShelleyGenesisWithDefault shelleyGenesisT overrideShelleyGenesis
+  shelleyGenesisTemplate <- overrideShelleyGenesis <$> readShelleyGenesisWithDefault shelleyGenesisT identity -- TODO, use readAndDecodeShelleyGenesis instead
   alonzoGenesis <- readAlonzoGenesis alonzoGenesisT
   delegateMap <- liftIO $ do
-    vrfKeys <- forM (map (convertDelegate) delegateKeys) $ \key -> do
+    vrfKeys <- forM (map (convertDelegate) delegateKeys) $ \_ -> do
       skey <- generateSigningKey AsVrfKey
       pure skey
-    kesKeys <- forM (map (convertDelegate) delegateKeys) $ \key -> do
+    kesKeys <- forM (map (convertDelegate) delegateKeys) $ \_ -> do
       skey <- generateSigningKey AsKesKey
       pure skey
     -- TODO: add opcerts
@@ -493,7 +506,7 @@ runGenesisCreateCardano (GenesisDir rootdir)
 
     writeSecrets deldir "byron" "key" serialiseToRawBytes byronDelegateKeys
     writeSecrets deldir "shelley" "skey" toSKeyJSON shelleyDelegateKeys
-    writeSecrets deldir "shelley" "vkey" toVkeyJSON shelleyDelegateKeys
+    writeSecrets deldir "shelley" "vkey" toVkeyJSON' shelleyDelegatevkeys
     writeSecrets deldir "shelley" "vrf.skey" toSKeyJSON vrfKeys
     writeSecrets deldir "shelley" "vrf.vkey" toVkeyJSON vrfKeys
     writeSecrets deldir "shelley" "kes.skey" toSKeyJSON kesKeys
@@ -512,8 +525,8 @@ runGenesisCreateCardano (GenesisDir rootdir)
     shelleyGenesis :: ShelleyGenesis StandardShelley
     shelleyGenesis = updateTemplate start delegateMap Nothing [] mempty 0 [] [] shelleyGenesisTemplate
         -- Shelley genesis parameters
-  writeFileGenesis (rootdir </> "genesis.json")        shelleyGenesis
-  writeFileGenesis (rootdir </> "genesis.alonzo.json") alonzoGenesis
+  writeFileGenesis (rootdir </> "shelley-genesis.json")        shelleyGenesis
+  writeFileGenesis (rootdir </> "alonzo-genesis.json") alonzoGenesis
 
   where
     fixError = withExceptT ShelleyGenesisCmdByronError
