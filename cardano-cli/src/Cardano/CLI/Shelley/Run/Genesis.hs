@@ -472,6 +472,26 @@ runGenesisCreateCardano (GenesisDir rootdir)
     -- TODO: add opcerts
 
     let
+      opCertInputs :: [(VerificationKey KesKey, SigningKey GenesisDelegateExtendedKey)]
+      opCertInputs = zip (map getVerificationKey kesKeys) shelleyDelegateKeys
+      createOpCert :: (VerificationKey KesKey, SigningKey GenesisDelegateExtendedKey) -> (OperationalCertificate, OperationalCertificateIssueCounter)
+      createOpCert (kesKey, delegateKey) =
+          case eResult of
+            Left err -> error $ show err
+            Right res -> res
+        where
+          eResult = issueOperationalCertificate kesKey (Right delegateKey) (KESPeriod 0) counter
+          counter = OperationalCertificateIssueCounter 0 (convert . getVerificationKey $ delegateKey)
+          convert :: VerificationKey GenesisDelegateExtendedKey
+                  -> VerificationKey StakePoolKey
+          convert = (castVerificationKey :: VerificationKey GenesisDelegateKey
+                                         -> VerificationKey StakePoolKey)
+                  . (castVerificationKey :: VerificationKey GenesisDelegateExtendedKey
+                                         -> VerificationKey GenesisDelegateKey)
+
+      opCerts :: [(OperationalCertificate, OperationalCertificateIssueCounter)]
+      opCerts = map createOpCert opCertInputs
+
       vrfvkeys = map getVerificationKey vrfKeys
       combinedMap :: [ ( VerificationKey GenesisKey
                        , VerificationKey GenesisDelegateKey
@@ -517,6 +537,12 @@ runGenesisCreateCardano (GenesisDir rootdir)
     writeSecrets utxodir "shelley" "vkey" toVkeyJSON shelleyUtxoKeys
 
     writeSecrets deldir "byron" "cert.json" serialiseDelegationCert dlgCerts
+
+    let
+      toOpCert = LBS.toStrict . textEnvelopeToJSON Nothing . fst
+      toCounter = LBS.toStrict . textEnvelopeToJSON Nothing . snd
+    writeSecrets deldir "shelley" "opcert.json" toOpCert opCerts
+    writeSecrets deldir "shelley" "counter.json" toCounter opCerts
 
     LBS.writeFile (rootdir </> "byron-genesis.json") (canonicalEncodePretty byronGenesis)
 
