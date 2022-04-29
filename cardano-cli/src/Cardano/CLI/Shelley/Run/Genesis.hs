@@ -17,7 +17,7 @@ module Cardano.CLI.Shelley.Run.Genesis
   ) where
 
 import           Cardano.Prelude hiding (unlines)
-import           Prelude (id, unlines, zip3)
+import           Prelude (id, unlines, zip3, error)
 
 import           Data.Aeson hiding (Key)
 import qualified Data.Aeson as Aeson
@@ -91,12 +91,13 @@ import           Cardano.CLI.Byron.Genesis as Byron
 import           Cardano.Chain.Genesis (FakeAvvmOptions (..), TestnetBalanceOptions (..), gsDlgIssuersSecrets, gsRichSecrets, gsPoorSecrets)
 import qualified Cardano.Chain.Common as Byron (rationalToLovelacePortion, mkKnownLovelace, KeyHash)
 
-import           Cardano.Chain.Common (BlockCount)
+import           Cardano.Chain.Common (BlockCount(unBlockCount))
 import           Text.Printf (printf)
 import qualified Cardano.Chain.Genesis as Genesis
 import           Cardano.Chain.Delegation (delegateVK)
 import           Cardano.Api.SerialiseTextEnvelope (textEnvelopeToJSON)
 import qualified Cardano.Chain.Delegation as Dlg
+import           Cardano.Slotting.Slot (EpochSize(EpochSize))
 
 {- HLINT ignore "Reduce duplication" -}
 
@@ -167,9 +168,7 @@ runGenesisCmd (GenesisVerKey vk sk) = runGenesisVerKey vk sk
 runGenesisCmd (GenesisTxIn vk nw mOutFile) = runGenesisTxIn vk nw mOutFile
 runGenesisCmd (GenesisAddr vk nw mOutFile) = runGenesisAddr vk nw mOutFile
 runGenesisCmd (GenesisCreate gd gn un ms am nw) = runGenesisCreate gd gn un ms am nw
-runGenesisCmd (GenesisCreateCardano gd gn un ms am k sc nw bg sg ag) = do
-  withExceptT ShelleyGenesisCmdByronError $ do
-    runGenesisCreateCardano gd gn un ms am k sc nw bg sg ag
+runGenesisCmd (GenesisCreateCardano gd gn un ms am k sc nw bg sg ag) = runGenesisCreateCardano gd gn un ms am k sc nw bg sg ag
 runGenesisCmd (GenesisCreateStaked gd gn gp gl un ms am ds nw bf bp su) = runGenesisCreateStaked gd gn gp gl un ms am ds nw bf bp su
 runGenesisCmd (GenesisHashFile gf) = runGenesisHashFile gf
 
@@ -406,13 +405,13 @@ runGenesisCreateCardano :: GenesisDir
                  -> FilePath -- Byron Genesis
                  -> FilePath -- Shelley Genesis
                  -> FilePath -- Alonzo Genesis
-                 -> ExceptT ByronGenesisError IO ()
+                 -> ExceptT ShelleyGenesisCmdError IO ()
 runGenesisCreateCardano (GenesisDir rootdir)
                  genNumGenesisKeys genNumUTxOKeys
                  mStart mAmount mSecurity mSlotCoeff
                  network byronGenesisT shelleyGenesisT alonzoGenesisT = do
   start <- maybe (SystemStart <$> getCurrentTimePlus30) pure mStart
-  (byronGenesis, byronSecrets) <- Byron.mkGenesis $ byronParams start
+  (byronGenesis, byronSecrets) <- fixError $ Byron.mkGenesis $ byronParams start
   let
 
     genesisKeys = gsDlgIssuersSecrets byronSecrets
@@ -436,8 +435,21 @@ runGenesisCreateCardano (GenesisDir rootdir)
 
     toVkeyJSON :: Key a => SigningKey a -> ByteString
     toVkeyJSON = LBS.toStrict . textEnvelopeToJSON Nothing . getVerificationKey
-  dlgCerts <- mapM (findDelegateCert byronGenesis) . map ByronSigningKey $ delegateKeys
-  liftIO $ do
+  dlgCerts <- fixError $ mapM (findDelegateCert byronGenesis) . map ByronSigningKey $ delegateKeys
+  let
+    overrideShelleyGenesis t = t
+      { sgNetworkMagic = unNetworkMagic (toNetworkMagic network)
+      , sgNetworkId = toShelleyNetwork network
+      , sgActiveSlotsCoeff = fromMaybe (error $ "Could not convert from Rational: " ++ show mSlotCoeff) $ Ledger.boundRational mSlotCoeff
+      , sgSecurityParam = unBlockCount mSecurity
+      , sgUpdateQuorum = fromIntegral $ ((genNumGenesisKeys `div` 3) * 2) + 1
+      , sgEpochLength = EpochSize $ floor $ (fromIntegral (unBlockCount mSecurity) * 10) / mSlotCoeff
+      , sgMaxLovelaceSupply = 45000000000000000
+      , sgSystemStart = getSystemStart start
+      }
+  shelleyGenesisTemplate <- readShelleyGenesisWithDefault shelleyGenesisT overrideShelleyGenesis
+  alonzoGenesis <- readAlonzoGenesis alonzoGenesisT
+  delegateMap <- liftIO $ do
     vrfKeys <- forM (map (convertDelegate) delegateKeys) $ \key -> do
       skey <- generateSigningKey AsVrfKey
       pure skey
@@ -460,44 +472,15 @@ runGenesisCreateCardano (GenesisDir rootdir)
       delegateMap = Map.fromList . (map hashKeys) $ combinedMap
 
 
-  --let overrideShelleyGenesis t = t {
-  --    sgNetworkMagic = unNetworkMagic (toNetworkMagic network)
-  --  --, sgNetworkId = Testnet
-  --  }
-
-  --  shelleyGenesis :: ShelleyGenesis StandardShelley
-  --  shelleyGenesis = updateTemplate start delegateMap Nothing [] mempty 0 [] [] undefined
-
-  --shelleyGenesisTemplate <- readShelleyGenesisWithDefault shelleyGenesisT overrideShelleyGenesis
-  --alonzoGenesisTemplate <- readAlonzoGenesis alonzoGenesisT
-
-  --let shelleyGenesis =
-  --      updateTemplate
-  --        -- Shelley genesis parameters
-  --        start delegateMap Nothing [] mempty 0 [] [] shelleyGenesisT
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-  --writeFileGenesis (rootdir </> "genesis.json")        shelleyGenesis
-  --writeFileGenesis (rootdir </> "genesis.alonzo.json") alonzoGenesis
-  --TODO: rationalise the naming convention on these genesis json files.
-  --where
-  --  adjustTemplate t = t { sgNetworkMagic = unNetworkMagic (toNetworkMagic network) }
-  --  gendir  = rootdir </> "genesis-keys"
-  --  deldir  = rootdir </> "delegate-keys"
-  --  utxodir = rootdir </> "utxo-keys"
+    --TODO: rationalise the naming convention on these genesis json files.
+    --where
+    --  adjustTemplate t = t { sgNetworkMagic = unNetworkMagic (toNetworkMagic network) }
+    --  gendir  = rootdir </> "genesis-keys"
+    --  deldir  = rootdir </> "delegate-keys"
+    --  utxodir = rootdir </> "utxo-keys"
 
     createDirectoryIfMissing False rootdir
     createDirectoryIfMissing False gendir
@@ -524,7 +507,16 @@ runGenesisCreateCardano (GenesisDir rootdir)
 
     LBS.writeFile (rootdir </> "byron-genesis.json") (canonicalEncodePretty byronGenesis)
 
+    return delegateMap
+  let
+    shelleyGenesis :: ShelleyGenesis StandardShelley
+    shelleyGenesis = updateTemplate start delegateMap Nothing [] mempty 0 [] [] shelleyGenesisTemplate
+        -- Shelley genesis parameters
+  writeFileGenesis (rootdir </> "genesis.json")        shelleyGenesis
+  writeFileGenesis (rootdir </> "genesis.alonzo.json") alonzoGenesis
+
   where
+    fixError = withExceptT ShelleyGenesisCmdByronError
     convertGenesisKey :: Byron.SigningKey -> SigningKey GenesisExtendedKey
     convertGenesisKey (Byron.SigningKey xsk) = GenesisExtendedSigningKey xsk
 
