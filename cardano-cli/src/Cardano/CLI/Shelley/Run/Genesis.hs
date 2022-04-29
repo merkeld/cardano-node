@@ -34,7 +34,7 @@ import qualified Data.Sequence.Strict as Seq
 import           Data.String (fromString)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import           Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime, picosecondsToDiffTime, secondsToNominalDiffTime)
+import           Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, getCurrentTime, secondsToNominalDiffTime)
 
 import           Cardano.Binary (ToCBOR (..), Annotated(Annotated))
 
@@ -98,7 +98,7 @@ import           Cardano.Api.SerialiseTextEnvelope (textEnvelopeToJSON)
 import qualified Cardano.Chain.Delegation as Dlg
 import           Cardano.Slotting.Slot (EpochSize(EpochSize))
 import           Cardano.Chain.Update
-import           Data.Fixed (div', Fixed(MkFixed))
+import           Data.Fixed (Fixed(MkFixed))
 
 {- HLINT ignore "Reduce duplication" -}
 
