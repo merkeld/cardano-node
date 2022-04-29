@@ -21,6 +21,7 @@ import           Prelude (id, unlines, zip3, error)
 
 import           Data.Aeson hiding (Key)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as Aeson
 import           Data.Aeson.Encode.Pretty (encodePretty)
 import qualified Data.Binary.Get as Bin
 import qualified Data.ByteString.Char8 as BS
@@ -99,6 +100,8 @@ import qualified Cardano.Chain.Delegation as Dlg
 import           Cardano.Slotting.Slot (EpochSize(EpochSize))
 import           Cardano.Chain.Update
 import           Data.Fixed (Fixed(MkFixed))
+import qualified Data.Yaml as Yaml
+import           Text.JSON.Canonical (parseCanonicalJSON, renderCanonicalJSON)
 
 {- HLINT ignore "Reduce duplication" -}
 
@@ -170,7 +173,7 @@ runGenesisCmd (GenesisVerKey vk sk) = runGenesisVerKey vk sk
 runGenesisCmd (GenesisTxIn vk nw mOutFile) = runGenesisTxIn vk nw mOutFile
 runGenesisCmd (GenesisAddr vk nw mOutFile) = runGenesisAddr vk nw mOutFile
 runGenesisCmd (GenesisCreate gd gn un ms am nw) = runGenesisCreate gd gn un ms am nw
-runGenesisCmd (GenesisCreateCardano gd gn un ms am k slotLength sc nw bg sg ag) = runGenesisCreateCardano gd gn un ms am k slotLength sc nw bg sg ag
+runGenesisCmd (GenesisCreateCardano gd gn un ms am k slotLength sc nw bg sg ag mNodeCfg) = runGenesisCreateCardano gd gn un ms am k slotLength sc nw bg sg ag mNodeCfg
 runGenesisCmd (GenesisCreateStaked gd gn gp gl un ms am ds nw bf bp su) = runGenesisCreateStaked gd gn gp gl un ms am ds nw bf bp su
 runGenesisCmd (GenesisHashFile gf) = runGenesisHashFile gf
 
@@ -408,11 +411,12 @@ runGenesisCreateCardano :: GenesisDir
                  -> FilePath -- Byron Genesis
                  -> FilePath -- Shelley Genesis
                  -> FilePath -- Alonzo Genesis
+                 -> Maybe FilePath
                  -> ExceptT ShelleyGenesisCmdError IO ()
 runGenesisCreateCardano (GenesisDir rootdir)
                  genNumGenesisKeys _genNumUTxOKeys
                  mStart mAmount mSecurity slotLength mSlotCoeff
-                 network byronGenesisT shelleyGenesisT alonzoGenesisT = do
+                 network byronGenesisT shelleyGenesisT alonzoGenesisT mNodeCfg = do
   start <- maybe (SystemStart <$> getCurrentTimePlus30) pure mStart
   (byronGenesis', byronSecrets) <- fixError $ Byron.mkGenesis $ byronParams start
   let
@@ -554,6 +558,42 @@ runGenesisCreateCardano (GenesisDir rootdir)
   writeFileGenesis (rootdir </> "shelley-genesis.json")        shelleyGenesis
   writeFileGenesis (rootdir </> "alonzo-genesis.json") alonzoGenesis
 
+  liftIO $ do
+    case mNodeCfg of
+      Nothing -> pure ()
+      Just nodeCfg -> do
+        nodeConfig <- Yaml.decodeFileThrow nodeCfg
+        let
+          hashShelleyGenesis :: ToJSON genesis => genesis -> Text
+          hashShelleyGenesis genesis = Crypto.hashToTextAsHex gh
+            where
+              content :: ByteString
+              content = LBS.toStrict $ encodePretty genesis
+              gh :: Crypto.Hash Crypto.Blake2b_256 ByteString
+              gh = Crypto.hashWith id content
+          hashByronGenesis :: Genesis.GenesisData -> Text
+          hashByronGenesis genesis = Crypto.hashToTextAsHex gh
+            where
+              bytes = canonicalEncodePretty genesis
+              reParsed = parseCanonicalJSON bytes
+              notEither (Right jsvalue) = jsvalue
+              notEither (Left _) = error "error parsing json that was just encoded!?"
+              value = notEither reParsed
+              reEncoded = LBS.toStrict $ renderCanonicalJSON value
+              gh :: Crypto.Hash Crypto.Blake2b_256 ByteString
+              gh = Crypto.hashWith id reEncoded
+          -- TODO, NodeConfig needs a ToJSON instance
+          updateConfig :: Yaml.Value -> Yaml.Value
+          updateConfig (Object obj) = Object
+              $ (Aeson.insert "ByronGenesisHash" (String $ hashByronGenesis byronGenesis))
+              $ (Aeson.insert "ShelleyGenesisHash" (String $ hashShelleyGenesis shelleyGenesis))
+              $ (Aeson.insert "AlonzoGenesisHash" (String $ hashShelleyGenesis alonzoGenesis))
+              obj
+          updateConfig x = x
+          newConfig :: Yaml.Value
+          newConfig = updateConfig nodeConfig
+        encodeFile (rootdir </> "node-config.json") newConfig
+
   where
     fixError = withExceptT ShelleyGenesisCmdByronError
     convertGenesisKey :: Byron.SigningKey -> SigningKey GenesisExtendedKey
@@ -613,19 +653,6 @@ runGenesisCreateCardano (GenesisDir rootdir)
   --template <- readShelleyGenesisWithDefault (rootdir </> "genesis.spec.json") adjustTemplate
   --alonzoGenesis <- readAlonzoGenesis (rootdir </> "genesis.alonzo.spec.json")
 
-  --let shelleyGenesis =
-  --      updateTemplate
-  --        -- Shelley genesis parameters
-  --        start genDlgs mAmount utxoAddrs mempty (Lovelace 0) [] [] template
-
-  --writeFileGenesis (rootdir </> "genesis.json")        shelleyGenesis
-  --writeFileGenesis (rootdir </> "genesis.alonzo.json") alonzoGenesis
-  --TODO: rationalise the naming convention on these genesis json files.
-  --where
-  --  adjustTemplate t = t { sgNetworkMagic = unNetworkMagic (toNetworkMagic network) }
-  --  gendir  = rootdir </> "genesis-keys"
-  --  deldir  = rootdir </> "delegate-keys"
-  --  utxodir = rootdir </> "utxo-keys"
 
 runGenesisCreateStaked
   :: GenesisDir

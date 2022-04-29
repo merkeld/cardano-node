@@ -102,6 +102,7 @@ library
                       , binary
                       , bytestring
                       , base16-bytestring >= 1.0
+                      , canonical-json
                       , cardano-api
                       , cardano-binary
                       , cardano-git-rev

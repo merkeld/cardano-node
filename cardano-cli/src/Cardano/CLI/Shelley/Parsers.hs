@@ -1169,6 +1169,7 @@ pGenesisCmd =
                     <*> parseFilePath
                           "alonzo-template"
                           "JSON file with genesis defaults for each alonzo."
+                    <*> pNodeConfigTemplate
 
     pGenesisCreate :: Parser GenesisCmd
     pGenesisCreate =
@@ -1223,9 +1224,12 @@ pGenesisCmd =
         Opt.option Opt.auto
           (  Opt.long "gen-genesis-keys"
           <> Opt.metavar "INT"
-          <> Opt.help "The number of genesis keys to make [default is 0]."
-          <> Opt.value 0
+          <> Opt.help "The number of genesis keys to make [default is 3]."
+          <> Opt.value 3
           )
+
+    pNodeConfigTemplate :: Parser (Maybe FilePath)
+    pNodeConfigTemplate = optional $ parseFilePath "node-config-template" "the node config template"
 
     pGenesisNumUTxOKeys :: Parser Word
     pGenesisNumUTxOKeys =
